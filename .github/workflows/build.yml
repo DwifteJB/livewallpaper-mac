@@ -1,0 +1,32 @@
+name: Build Binary & App Bundle
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v6
+      # setup xcode for swiftc
+      - uses: maxim-lobanov/setup-xcode@v1
+        with:
+            xcode-version: '26.3'
+      # build appbundle which also builds binary
+      - name: Build App Bundle
+        run: |
+          chmod +x ./build.sh
+          chmod +x ./build-app.sh
+          zsh ./build-app.sh
+      # upload the entire folder as an artifact (cuz it has bundle & binary)
+      - name: Upload App Bundle
+        uses: actions/upload-artifact@v7
+        with:
+            name: livewallpaper
+            path: ./build
+    
+     
