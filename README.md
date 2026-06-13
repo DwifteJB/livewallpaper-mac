@@ -1,7 +1,7 @@
 
 # Live Wallpaper for MacOS
 
-![app image](https://raw.githubusercontent.com/DwifteJB/livewallpaper-mac/refs/heads/mains/.github/readme/app-screenshot.png)
+![app image](https://raw.githubusercontent.com/DwifteJB/livewallpaper-mac/refs/heads/main/.github/readme/app-screenshot.png)
 
 TODO: get a better name
 
