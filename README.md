@@ -10,13 +10,12 @@ Super simple livewallpaper picker build w/ swift, instead of paying for a subscr
 ## how does it work??
 
 it works by putting a window behind the icons but above the actual wallpaper itself. once its ran it uses the first frame for the macos accent and sets it as the actual wallpaper, then transcodes into a MOV file (so the GPU can be utilised properly) then loops and plays the video. its quite simple.
-  
 
 ## How to build
 
 
 ### Binary
-Ensure that you have xcode or xcode command line tools.
+Ensure that you have xcode or xcode command line tools. The build downloads a static ffmpeg into `vendor/` on first run (needs an internet connection once).
 
 ```
 zsh ./build.sh

@@ -10,16 +10,19 @@ APP="$BUILD/LiveWallpaper.app"
 
 echo "Assembling $APP"
 rm -rf "$APP"
-mkdir -p "$APP/Contents/MacOS"
+mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 
 cp "$BUILD/livewallpaper" "$APP/Contents/MacOS/livewallpaper"
+
+# bundle ffmpeg
+cp "$ROOT/vendor/ffmpeg" "$APP/Contents/Resources/ffmpeg"
 
 echo "Copying plists..."
 
 cp resources/Info.plist "$APP/Contents/Info.plist"
 
-# ad-hoc sign so gatekeeper lets the locally-built bundle run
-# later add a --release?
+# sign the nested ffmpeg first, then the bundle, so gatekeeper lets the local build run
+codesign --force --sign - "$APP/Contents/Resources/ffmpeg"
 codesign --force --sign - "$APP"
 
 echo "Compiled!! -  $APP"

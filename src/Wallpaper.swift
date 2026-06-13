@@ -2,6 +2,11 @@ import AppKit
 import AVFoundation
 import QuartzCore
 
+// mutable seconds holder so the ffmpeg log closure stays sendable
+private final class DurationBox {
+    var seconds: Double = 0
+}
+
 final class WallpaperController {
     static let shared = WallpaperController()
 
@@ -23,6 +28,28 @@ final class WallpaperController {
     var currentRate: Float { rate }
     var statusBar: StatusBarController?
 
+    // if nil, no progress
+    var progressHandler: ((Double?) -> Void)?
+    var errorHandler: ((String) -> Void)?
+
+    // formats needing for ffmpeg
+    private let ffmpegFormats: Set<String> = ["webm", "mkv", "avi", "flv", "wmv", "ogv"]
+
+    private func reportProgress(_ p: Double?) { progressHandler?(p) }
+    private func reportError(_ m: String) { errorHandler?(m) }
+
+    private static func ffmpegPath() -> String? {
+        let fm = FileManager.default
+        // bundled ffmpeg ships in the .app's Resources, or next to the loose binary
+        var candidates = [
+            Bundle.main.resourceURL?.appendingPathComponent("ffmpeg").path,
+            Bundle.main.executableURL?.deletingLastPathComponent().appendingPathComponent("ffmpeg").path,
+        ].compactMap { $0 }
+        // fall back to a system install if the bundle somehow shipped without it
+        candidates += ["/opt/homebrew/bin/ffmpeg", "/usr/local/bin/ffmpeg", "/usr/bin/ffmpeg"]
+        return candidates.first { fm.isExecutableFile(atPath: $0) }
+    }
+
     private let recentsKey = "recentWallpapers"
     private let recentsLimit = 20
 
@@ -32,6 +59,11 @@ final class WallpaperController {
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         return dir
     }()
+
+    func clearCache() {
+        try? FileManager.default.removeItem(at: cacheDir)
+        try? FileManager.default.createDirectory(at: cacheDir, withIntermediateDirectories: true)
+    }
 
     func load(path: String) {
         let source = URL(fileURLWithPath: path)
@@ -49,13 +81,18 @@ final class WallpaperController {
         currentSource = source
         isPlaying = true
         pushRecent(source)
-
-        setDesktopToFirstFrame(of: source)
         buildPanelsIfNeeded()
 
+        // for formats requiring fffffmpeg
+        let needsFFmpeg = ffmpegFormats.contains(source.pathExtension.lowercased())
+        if !needsFFmpeg { setDesktopToFirstFrame(of: source) }
+
+        reportProgress(0)
         transcodeToMOV(source: source) { [weak self] playable in
             guard let self, token == self.loadToken else { return }
+            self.reportProgress(nil)
             self.play(url: playable)
+            if needsFFmpeg { self.setDesktopToFirstFrame(of: playable) }
         }
     }
 
@@ -197,7 +234,8 @@ final class WallpaperController {
 
     // mov is much better for support, performance, and literally fucking everything for mac
     private func transcodeToMOV(source: URL, completion: @escaping (URL) -> Void) {
-        if source.pathExtension.lowercased() == "mov" {
+        let ext = source.pathExtension.lowercased()
+        if ext == "mov" {
             completion(source)
             return
         }
@@ -207,7 +245,16 @@ final class WallpaperController {
             completion(cached)
             return
         }
+        try? FileManager.default.removeItem(at: cached)
 
+        if ffmpegFormats.contains(ext) {
+            transcodeWithFFmpeg(source: source, to: cached, completion: completion)
+        } else {
+            transcodeWithAVFoundation(source: source, to: cached, completion: completion)
+        }
+    }
+
+    private func transcodeWithAVFoundation(source: URL, to cached: URL, completion: @escaping (URL) -> Void) {
         guard let export = AVAssetExportSession(
             asset: AVURLAsset(url: source),
             presetName: AVAssetExportPresetHEVCHighestQuality
@@ -216,19 +263,90 @@ final class WallpaperController {
             return
         }
 
-        try? FileManager.default.removeItem(at: cached)
         Task {
             // fall back to the source so a failed transcode still plays
             // even if the file is like lowkey corrupted, still try
             let result: URL
             do {
-                try await export.export(to: cached, as: .mov)
+                // states() only observes, export(to:as:) drives it, so run them together
+                async let exportRun: Void = export.export(to: cached, as: .mov)
+                for await state in export.states(updateInterval: 0.15) {
+                    if case .exporting(let progress) = state {
+                        self.reportProgress(progress.fractionCompleted)
+                    }
+                }
+                try await exportRun
                 result = cached
             } catch {
                 result = source
             }
             await MainActor.run { completion(result) }
         }
+    }
+
+    private func transcodeWithFFmpeg(source: URL, to cached: URL, completion: @escaping (URL) -> Void) {
+        guard let ffmpeg = Self.ffmpegPath() else {
+            reportError("ffmpeg is missing — \(source.pathExtension.lowercased()) files need the bundled ffmpeg. rebuild with `zsh ./build-app.sh`, or `brew install ffmpeg`.")
+            completion(source)
+            return
+        }
+
+        let report = progressHandler
+        Task.detached {
+            // gpu encode first, fall back to software h.264 if this ffmpeg lacks videotoolbox
+            let videotoolbox = ["-c:v", "hevc_videotoolbox", "-tag:v", "hvc1", "-b:v", "10M"]
+            let software = ["-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "20", "-preset", "veryfast"]
+
+            let ok = Self.runFFmpeg(ffmpeg, source: source, to: cached, videoArgs: videotoolbox, report: report)
+                || {
+                    report?(0)
+                    return Self.runFFmpeg(ffmpeg, source: source, to: cached, videoArgs: software, report: report)
+                }()
+            await MainActor.run { completion(ok ? cached : source) }
+        }
+    }
+
+    // runs ffmpeg to completion (blocking, call off-main), wiring stderr to the progress report. true on success
+    private static func runFFmpeg(_ ffmpeg: String, source: URL, to cached: URL, videoArgs: [String], report: ((Double?) -> Void)?) -> Bool {
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: ffmpeg)
+        proc.arguments = ["-y", "-i", source.path] + videoArgs + ["-c:a", "aac", cached.path]
+
+        // ffmpeg logs to stderr, parse Duration: once then time= per line for a fraction.
+        // the handle's queue serializes these calls, the box just keeps duration sendable
+        let pipe = Pipe()
+        proc.standardError = pipe
+        proc.standardOutput = Pipe()
+        let duration = DurationBox()
+        pipe.fileHandleForReading.readabilityHandler = { handle in
+            let chunk = String(decoding: handle.availableData, as: UTF8.self)
+            if duration.seconds == 0, let d = parseFFmpegTime(chunk, key: "Duration:") {
+                duration.seconds = d
+            }
+            if duration.seconds > 0, let t = parseFFmpegTime(chunk, key: "time=") {
+                report?(min(1, t / duration.seconds))
+            }
+        }
+
+        defer { pipe.fileHandleForReading.readabilityHandler = nil }
+        do {
+            try proc.run()
+            proc.waitUntilExit()
+        } catch {
+            return false
+        }
+        return proc.terminationStatus == 0 && FileManager.default.fileExists(atPath: cached.path)
+    }
+
+    // pulls the first "<key> HH:MM:SS.ss" timestamp out of an ffmpeg log chunk, as seconds
+    private static func parseFFmpegTime(_ text: String, key: String) -> Double? {
+        guard let range = text.range(of: key) else { return nil }
+        let tail = text[range.upperBound...].drop { $0 == " " }
+        let stamp = tail.prefix { "0123456789:.".contains($0) }
+        let parts = stamp.split(separator: ":")
+        guard parts.count == 3,
+              let h = Double(parts[0]), let m = Double(parts[1]), let s = Double(parts[2]) else { return nil }
+        return h * 3600 + m * 60 + s
     }
 
     // check to see if we actually need to transcode or use a cached file

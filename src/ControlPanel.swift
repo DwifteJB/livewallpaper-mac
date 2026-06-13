@@ -61,6 +61,8 @@ final class PanelModel: ObservableObject {
     @Published var cpuText = "—"
     @Published var cacheText = "—"
     @Published var launchAtLogin = false
+    @Published var transcodeProgress: Double?
+    @Published var errorMessage: String?
 
     let speeds: [Float] = [0.5, 0.75, 1.0, 1.25, 1.5]
     // need an app bundle for this
@@ -71,6 +73,13 @@ final class PanelModel: ObservableObject {
     private var lastSample = Date()
 
     func start() {
+        let c = WallpaperController.shared
+        c.progressHandler = { [weak self] p in
+            DispatchQueue.main.async { self?.transcodeProgress = p }
+        }
+        c.errorHandler = { [weak self] m in
+            DispatchQueue.main.async { self?.errorMessage = m }
+        }
         tick()
         guard timer == nil else { return }
         timer = Timer.scheduledTimer(withTimeInterval: 1.5, repeats: true) { [weak self] _ in
@@ -108,6 +117,11 @@ final class PanelModel: ObservableObject {
         lastSample = now
     }
 
+    func clearCache() {
+        WallpaperController.shared.clearCache()
+        tick()
+    }
+
     func togglePlay() {
         WallpaperController.shared.togglePlayPause()
         isPlaying = WallpaperController.shared.isPlaying
@@ -126,13 +140,18 @@ final class PanelModel: ObservableObject {
     }
 
     func load(_ url: URL) {
+        errorMessage = nil
         WallpaperController.shared.load(path: url.path)
         tick()
     }
 
     func openFile() {
         let panel = NSOpenPanel()
-        panel.allowedContentTypes = [.movie, .video, .mpeg4Movie, .quickTimeMovie]
+        var types: [UTType] = [.movie, .video, .mpeg4Movie, .quickTimeMovie]
+        // use UTType(filenameExtension:) to avoid hardcoding UTI strings
+        types += ["webm", "mkv", "avi"].compactMap { UTType(filenameExtension: $0) }
+        panel.allowedContentTypes = types
+        panel.allowsOtherFileTypes = true
         panel.allowsMultipleSelection = false
         panel.canChooseDirectories = false
         NSApp.activate(ignoringOtherApps: true)
@@ -177,6 +196,7 @@ struct ControlPanelView: View {
     private var mainColumn: some View {
         VStack(spacing: 12) {
             header
+            errorBanner
             controls
             openButton
             Divider()
@@ -187,6 +207,8 @@ struct ControlPanelView: View {
             statsSection
             Divider()
             loginToggle
+            Divider()
+            clearCacheButton
             quitButton
         }
         .padding(14)
@@ -200,6 +222,19 @@ struct ControlPanelView: View {
             } else {
                 Rectangle().fill(.quaternary)
             }
+            if let progress = model.transcodeProgress {
+                ZStack {
+                    Color.black.opacity(0.5)
+                    VStack(spacing: 8) {
+                        Text("Processing… \(Int(progress * 100))%")
+                            .font(.caption).bold().foregroundStyle(.white)
+                        ProgressView(value: progress)
+                            .progressViewStyle(.linear)
+                            .tint(.white)
+                            .padding(.horizontal, 24)
+                    }
+                }
+            }
         }
         .frame(height: 130)
         .frame(maxWidth: .infinity)
@@ -211,6 +246,26 @@ struct ControlPanelView: View {
                 .padding(.horizontal, 8).padding(.vertical, 4)
                 .background(.black.opacity(0.45), in: Capsule())
                 .padding(8)
+        }
+    }
+
+    private var errorBanner: some View {
+        Group {
+            if let message = model.errorMessage {
+                HStack(alignment: .top, spacing: 6) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                    Text(message).fixedSize(horizontal: false, vertical: true)
+                    Spacer(minLength: 0)
+                    Button { model.errorMessage = nil } label: {
+                        Image(systemName: "xmark")
+                    }
+                    .buttonStyle(.plain)
+                }
+                .font(.caption2)
+                .foregroundStyle(.orange)
+                .padding(8)
+                .background(.orange.opacity(0.12), in: RoundedRectangle(cornerRadius: 8))
+            }
         }
     }
 
@@ -309,6 +364,13 @@ struct ControlPanelView: View {
         .font(.caption)
         .disabled(!model.canManageLogin)
         .help(model.canManageLogin ? "" : "unavaliable due to loose binary")
+    }
+
+    private var clearCacheButton: some View {
+        Button { model.clearCache() } label: {
+            Label("Clear Cache", systemImage: "trash").frame(maxWidth: .infinity)
+        }
+        .controlSize(.large)
     }
 
     private var quitButton: some View {

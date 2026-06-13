@@ -1,2 +1,5 @@
 build/
+vendor/
 aigis.mp4
+*.webm
+*.mp4
