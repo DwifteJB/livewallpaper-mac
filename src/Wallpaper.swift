@@ -20,8 +20,10 @@ final class WallpaperController {
     private var loopers: [AVPlayerLooper] = []
     private var loadToken = 0
     private var occlusionObserver: NSObjectProtocol?
+    private var screenObserver: NSObjectProtocol?
 
     private(set) var currentSource: URL?
+    private var currentPlayable: URL?
     private(set) var isPlaying = true
     private(set) var isMuted = true
     private var rate: Float = 1.0
@@ -170,9 +172,11 @@ final class WallpaperController {
         loopers.removeAll()
         panels.forEach { $0.window.orderOut(nil) }
         panels.removeAll()
+        currentPlayable = nil
     }
 
     private func play(url: URL) {
+        currentPlayable = url
         players.forEach { $0.pause() }
         players.removeAll()
         loopers.removeAll()
@@ -230,6 +234,49 @@ final class WallpaperController {
             panels.append(Panel(window: window, playerLayer: playerLayer))
         }
         observeOcclusion()
+        observeScreenChanges()
+    }
+
+    // has the resoltuion changed?
+    private func observeScreenChanges() {
+        guard screenObserver == nil else { return }
+        screenObserver = NotificationCenter.default.addObserver(
+            forName: NSApplication.didChangeScreenParametersNotification,
+            object: nil, queue: .main
+        ) { [weak self] _ in
+            self?.syncPanelsToScreens()
+        }
+    }
+
+    private func syncPanelsToScreens() {
+        guard !panels.isEmpty else { return }
+        let screens = NSScreen.screens
+
+        // displays changed, rebuild all windows and players
+        if screens.count != panels.count {
+            let playable = currentPlayable
+            players.forEach { $0.pause() }
+            players.removeAll()
+            loopers.removeAll()
+            panels.forEach { $0.window.orderOut(nil) }
+            panels.removeAll()
+            buildPanelsIfNeeded()
+            if let playable { play(url: playable) }
+            return
+        }
+
+        // same display, jus resize
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        for (panel, screen) in zip(panels, screens) {
+            panel.window.setFrame(screen.frame, display: true)
+            if let view = panel.window.contentView {
+                view.frame = NSRect(origin: .zero, size: screen.frame.size)
+                view.layer?.frame = view.bounds
+                panel.playerLayer.frame = view.bounds
+            }
+        }
+        CATransaction.commit()
     }
 
     // mov is much better for support, performance, and literally fucking everything for mac
